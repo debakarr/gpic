@@ -109,7 +109,7 @@ class RichUploadDisplay:
         return Group(
             Text(f"Uploading {self._total_files} files ({_format_size(self._total_bytes)})"),
             self._overall,
-            Text(summary_text) if summary_text else Text(""),
+            Text.from_markup(summary_text) if summary_text else Text(""),
             Text(""),
             self._files,
         )
