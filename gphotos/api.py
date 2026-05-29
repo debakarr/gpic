@@ -258,7 +258,12 @@ class GooglePhotosAPI:
             content=_chunked_reader(),
             headers=headers,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            body = resp.content[:500]
+            log.error(f"Upload failed ({resp.status_code}): {body}")
+            raise RuntimeError(
+                f"Upload rejected ({resp.status_code}): {body.decode(errors='replace')}"
+            )
 
         token = CommitToken()
         token.ParseFromString(resp.content)
