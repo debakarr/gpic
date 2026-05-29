@@ -249,9 +249,9 @@ class GooglePhotosAPI:
             "Authorization": f"Bearer {self._bearer()}",
             "Content-Type": "application/octet-stream",
             "User-Agent": self._user_agent,
-            # Always set Content-Range so server tracks partial progress
-            "Content-Range": f"bytes {start_byte}-{file_size - 1}/{file_size}",
         }
+        if start_byte > 0:
+            headers["Content-Range"] = f"bytes {start_byte}-{file_size - 1}/{file_size}"
 
         resp = self._client.put(
             upload_url,
