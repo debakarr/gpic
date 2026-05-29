@@ -1,0 +1,10 @@
+syntax = "proto3";
+package gphotos;
+
+message CreateAlbumResponse {
+  message Field1Type {
+    string album_media_key = 1;
+  }
+  Field1Type field1 = 1;
+  repeated string field2 = 2;
+}

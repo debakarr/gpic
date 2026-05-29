@@ -1,0 +1,7 @@
+syntax = "proto3";
+package gphotos;
+
+message CommitToken {
+  int64 field1 = 1;
+  bytes field2 = 2;
+}

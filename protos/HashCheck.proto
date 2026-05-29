@@ -1,0 +1,14 @@
+syntax = "proto3";
+package gphotos;
+
+message HashCheck {
+  message Field1Type {
+    message Field1Type {
+      bytes sha1_hash = 1;
+    }
+    Field1Type field1 = 1;
+    message Field2Type {}
+    Field2Type field2 = 2;
+  }
+  Field1Type field1 = 1;
+}
