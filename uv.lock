@@ -59,7 +59,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gphotos-py"
+name = "gpic"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

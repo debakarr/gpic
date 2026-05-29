@@ -13,6 +13,9 @@ from gphotos.progress import FileProgress, ProgressTracker
 from gphotos.upload_cache import UploadCache
 
 
+_HashedFile = tuple[str, bytes, str]  # file_path, sha1_bytes, sha1_b64
+
+
 class UploadResult:
     def __init__(self, file_path: str, success: bool, media_key: str = "", error: str = ""):
         self.file_path = file_path
@@ -158,25 +161,64 @@ class UploadManager:
             use_quota=self._use_quota,
         )
 
-        with ThreadPoolExecutor(max_workers=self._threads) as executor:
-            futures: Set = {
-                executor.submit(self._upload_file, f): f for f in files
-            }
-            while futures and not self._cancelled:
-                done, futures = wait(futures, timeout=0.5, return_when=FIRST_COMPLETED)
-                if self._cancelled:
-                    for f in futures:
-                        f.cancel()
-                    break
-                for future in done:
-                    result = future.result()
+        # Phase 1: Hash all files in parallel (CPU-bound, 2 threads is enough)
+        hash_executor = ThreadPoolExecutor(max_workers=2)
+        hash_futures: dict = {
+            hash_executor.submit(self._hash_file, f): f for f in files
+        }
+
+        # Phase 2: Upload files as their hashes complete (I/O-bound)
+        upload_executor = ThreadPoolExecutor(max_workers=self._threads)
+        upload_futures: Set = set()
+        hash_done = set()
+
+        while hash_futures and not self._cancelled:
+            done, hash_futures = wait(hash_futures, timeout=0.5, return_when=FIRST_COMPLETED)
+            for f in done:
+                hashed = f.result()
+                hash_done.add(hashed[0])
+                # Submit upload immediately — don't wait for all hashes
+                upload_futures.add(upload_executor.submit(self._upload_with_hash, hashed))
+            # Also check for completed uploads
+            if upload_futures:
+                u_done, upload_futures = wait(upload_futures, timeout=0, return_when=FIRST_COMPLETED)
+                for f in u_done:
+                    result = f.result()
                     self.results.append(result)
                     self._emit("file_result", result)
+
+        hash_executor.shutdown(wait=False)
+
+        # Wait for remaining uploads
+        while upload_futures and not self._cancelled:
+            done, upload_futures = wait(upload_futures, timeout=0.5, return_when=FIRST_COMPLETED)
+            if self._cancelled:
+                for f in upload_futures:
+                    f.cancel()
+                break
+            for f in done:
+                result = f.result()
+                self.results.append(result)
+                self._emit("file_result", result)
+
+        upload_executor.shutdown(wait=False)
 
         self._handle_albums()
         self._emit("upload_done", None)
 
-    def _upload_file(self, file_path: str) -> UploadResult:
+    def _hash_file(self, file_path: str) -> _HashedFile:
+        """Phase 1: compute SHA-1 hash (CPU-bound). Runs in hash thread pool."""
+        fp = self.progress.get(file_path)
+        fp.status = "hashing"
+        fp.message = "Calculating SHA1..."
+        self._emit("file_progress", fp)
+        sha1 = self._api.calculate_sha1(file_path)
+        sha1_b64 = base64.urlsafe_b64encode(sha1).decode()
+        return (file_path, sha1, sha1_b64)
+
+    def _upload_with_hash(self, hashed: _HashedFile) -> UploadResult:
+        """Phase 2: upload a file that already has its hash computed. Runs in upload thread pool."""
+        file_path, sha1, sha1_b64 = hashed
         if self._cancelled:
             return UploadResult(file_path, False, error="Cancelled")
 
@@ -188,12 +230,6 @@ class UploadManager:
         timestamp = int(os.path.getmtime(file_path))
 
         try:
-            # Stage 1: Hash
-            fp.status = "hashing"
-            fp.message = "Calculating SHA1..."
-            self._emit("file_progress", fp)
-            sha1 = api.calculate_sha1(file_path)
-            sha1_b64 = base64.urlsafe_b64encode(sha1).decode()
 
             # Stage 2: Check
             if not self._force:
