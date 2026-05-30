@@ -120,10 +120,11 @@ def creds_set(ctx, email):
 @click.option("--quota", is_flag=True, help="Use storage quota (mimics Pixel 8)")
 @click.option("--proxy", default="", help="HTTP proxy URL")
 @click.option("--json", "json_output", is_flag=True, help="Output JSON summary")
+@click.option("--sort-size", is_flag=True, help="Process largest files first")
 @click.pass_context
 def upload(
     ctx, paths, recursive, threads, force, delete, album,
-    saver, quota, proxy, json_output,
+    saver, quota, proxy, json_output, sort_size,
 ):
     config: ConfigManager = ctx.obj["config"]
     if not config.config.selected_email:
@@ -162,6 +163,11 @@ def upload(
         return
 
     total_bytes = sum(os.path.getsize(f) for f in files)
+
+    # Sort by size (largest first) if requested
+    if sort_size:
+        files.sort(key=lambda f: os.path.getsize(f) if os.path.exists(f) else 0, reverse=True)
+        click.echo("Sorting: largest files first")
 
     # Auto-detect optimal thread count when 0 or not specified
     if threads == 0:
@@ -203,7 +209,7 @@ def upload(
                 display.update_file(data)
 
         manager._on_event = on_event
-        manager.start(list(paths))
+        manager.start(list(paths), files)
 
     succeeded = len([r for r in manager.results if r.success])
     failed = len([r for r in manager.results if not r.success])

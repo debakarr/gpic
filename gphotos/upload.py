@@ -139,9 +139,10 @@ class UploadManager:
                             files.append(str(f.absolute()))
         return files
 
-    def start(self, paths: list[str]):
+    def start(self, paths: list[str], files: Optional[list[str]] = None):
         self._emit("upload_start", None)
-        files = self._scan_files(paths)
+        if files is None:
+            files = self._scan_files(paths)
         if not files:
             self._emit("upload_done", None)
             return
