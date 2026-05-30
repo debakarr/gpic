@@ -129,12 +129,33 @@ class GooglePhotosAPI:
             raise RuntimeError("Missing X-GUploader-UploadID header")
         return upload_id
 
+    def get_upload_token_skip_hash(self, file_size: int) -> str:
+        """Get upload token without X-Goog-Hash (hash computed during upload)."""
+        msg = GetUploadToken(
+            f1=2, f2=2, f3=1, f4=3, file_size_bytes=file_size
+        )
+        data = msg.SerializeToString()
+
+        resp = self._post_proto_raw(
+            "https://photos.googleapis.com/data/upload/uploadmedia/interactive",
+            data,
+            {
+                "X-Upload-Content-Length": str(file_size),
+            },
+        )
+        upload_id = resp.headers.get("X-GUploader-UploadID")
+        if not upload_id:
+            raise RuntimeError("Missing X-GUploader-UploadID header")
+        return upload_id
+
     def upload_file(
         self,
         file_path: str,
         upload_id: str,
         on_progress: Optional[Callable[[int, int], None]] = None,
         resume_offset: int = 0,
+        compute_hash: bool = False,
+        hash_out: Optional[list] = None,
     ) -> CommitToken:
         file_size = os.path.getsize(file_path)
         upload_url = (
@@ -148,7 +169,8 @@ class GooglePhotosAPI:
                 raise RuntimeError("Upload cancelled")
             try:
                 return self._do_upload_attempt(
-                    file_path, upload_url, file_size, on_progress, attempt, resume_offset
+                    file_path, upload_url, file_size, on_progress, attempt,
+                    resume_offset, compute_hash, hash_out,
                 )
             except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
                 last_error = e
@@ -220,8 +242,11 @@ class GooglePhotosAPI:
         on_progress: Optional[Callable[[int, int], None]] = None,
         attempt: int = 0,
         start_byte: int = 0,
+        compute_hash: bool = False,
+        hash_out: Optional[list] = None,
     ) -> CommitToken:
         import typing
+        import hashlib
 
         # On retries, also check if server has partial data
         if attempt > 0:
@@ -232,7 +257,9 @@ class GooglePhotosAPI:
             if resume_byte is not None:
                 start_byte = resume_byte + 1
 
-        # Stream the file in chunks with Content-Range for server-side tracking
+        # Stream the file, optionally computing SHA1 on the fly
+        sha1_hasher = hashlib.sha1() if compute_hash else None
+
         def _chunked_reader() -> typing.Generator[bytes, None, None]:
             total_read = start_byte
             with open(file_path, "rb") as f:
@@ -245,6 +272,8 @@ class GooglePhotosAPI:
                     if not chunk:
                         break
                     total_read += len(chunk)
+                    if sha1_hasher is not None:
+                        sha1_hasher.update(chunk)
                     if on_progress:
                         on_progress(total_read, file_size)
                     yield chunk
@@ -269,6 +298,10 @@ class GooglePhotosAPI:
             raise RuntimeError(
                 f"Upload rejected ({resp.status_code}): {body.decode(errors='replace')}"
             )
+
+        # If computing hash on the fly, store the result
+        if sha1_hasher is not None and hash_out is not None:
+            hash_out.append(sha1_hasher.digest())
 
         token = CommitToken()
         token.ParseFromString(resp.content)

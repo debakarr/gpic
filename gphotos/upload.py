@@ -166,6 +166,90 @@ class UploadManager:
             use_quota=self._use_quota,
         )
 
+        if self._force:
+            # FORCE mode: skip pre-hashing, upload immediately with on-the-fly hash
+            self._start_force(files)
+        else:
+            self._start_normal(files)
+
+        self._handle_albums()
+        self._emit("upload_done", None)
+
+    def _start_normal(self, files: list[str]):
+        """Normal mode: pre-hash all files for dedup, then upload."""
+        hash_executor = ThreadPoolExecutor(max_workers=2)
+        hash_futures: dict = {
+            hash_executor.submit(self._hash_file, f): f for f in files
+        }
+
+        upload_executor = ThreadPoolExecutor(max_workers=self._threads)
+        upload_futures: Set = set()
+
+        while hash_futures and not self._cancelled:
+            done, hash_futures = wait(hash_futures, timeout=0.5, return_when=FIRST_COMPLETED)
+            for f in done:
+                hashed = f.result()
+                upload_futures.add(upload_executor.submit(self._upload_with_hash, hashed))
+            self._drain_uploads(upload_futures)
+
+        hash_executor.shutdown(wait=False)
+        self._drain_uploads(upload_futures, wait_all=True)
+        upload_executor.shutdown(wait=False)
+
+    def _start_force(self, files: list[str]):
+        """Force mode: skip pre-hashing, upload immediately with on-the-fly hash."""
+        with ThreadPoolExecutor(max_workers=self._threads) as executor:
+            futures: Set = {
+                executor.submit(self._upload_force, f): f for f in files
+            }
+            while futures and not self._cancelled:
+                done, futures = wait(futures, timeout=0.5, return_when=FIRST_COMPLETED)
+                if self._cancelled:
+                    for f in futures:
+                        f.cancel()
+                    break
+                for f in done:
+                    result = f.result()
+                    self.results.append(result)
+                    self._emit("file_result", result)
+
+    def _drain_uploads(self, upload_futures: Set, wait_all: bool = False):
+        """Process completed uploads without blocking."""
+        while upload_futures and not self._cancelled:
+            done, upload_futures = wait(upload_futures, timeout=0.5 if wait_all else 0,
+                                         return_when=FIRST_COMPLETED)
+            if self._cancelled:
+                for f in upload_futures:
+                    f.cancel()
+                break
+            for f in done:
+                result = f.result()
+                self.results.append(result)
+                self._emit("file_result", result)
+            if not wait_all:
+                break
+            return
+
+        for f in files:
+            try:
+                size = os.path.getsize(f)
+            except OSError:
+                size = 0
+            self.progress.add_file(f, size)
+
+        self._emit("batch_start", {
+            "total": self.progress.total_files,
+            "total_bytes": self.progress.total_bytes,
+        })
+
+        self._api = GooglePhotosAPI(
+            auth_string=self._credential.auth_string,
+            language=self._credential.language,
+            proxy=self._proxy,
+            saver_mode=self._saver,
+            use_quota=self._use_quota,
+        )
+
         # Phase 1: Hash all files in parallel (CPU + disk I/O bound)
         hash_executor = ThreadPoolExecutor(max_workers=4)
         hash_futures: dict = {
@@ -210,6 +294,66 @@ class UploadManager:
 
         self._handle_albums()
         self._emit("upload_done", None)
+
+    def _upload_force(self, file_path: str) -> UploadResult:
+        """Force upload: skip dedup check, compute SHA1 during upload."""
+        if self._cancelled:
+            return UploadResult(file_path, False, error="Cancelled")
+
+        fp = self.progress.get(file_path)
+        api = self._api
+        assert api is not None
+
+        file_name = os.path.basename(file_path)
+        timestamp = int(os.path.getmtime(file_path))
+        file_size = os.path.getsize(file_path)
+
+        try:
+            # Get upload token (without X-Goog-Hash — we'll compute hash during upload)
+            fp.status = "uploading"
+            fp.message = "Requesting upload token..."
+            self._emit("file_progress", fp)
+            upload_id = api.get_upload_token_skip_hash(file_size)
+
+            # Upload with on-the-fly SHA1 computation
+            fp.status = "uploading"
+            fp.message = "Uploading..."
+            self._emit("file_progress", fp)
+
+            sha1_out: list = []
+
+            def on_progress(read_bytes: int, total_bytes: int):
+                fp.update_bytes(read_bytes, total_bytes)
+                if fp.should_emit():
+                    self._emit("file_progress", fp)
+
+            commit_token = api.upload_file(
+                file_path, upload_id, on_progress,
+                resume_offset=0, compute_hash=True, hash_out=sha1_out,
+            )
+            sha1 = sha1_out[0] if sha1_out else api.calculate_sha1(file_path)
+            fp.bytes_uploaded = file_size
+            self._emit("file_progress", fp)
+
+            # Commit
+            fp.status = "committing"
+            fp.message = "Committing upload..."
+            self._emit("file_progress", fp)
+            media_key = api.commit_upload(commit_token, file_name, sha1, timestamp)
+
+            fp.status = "completed"
+            fp.message = "Uploaded"
+            self._emit("file_progress", fp)
+            self.progress.completed += 1
+
+            return UploadResult(file_path, True, media_key)
+
+        except Exception as e:
+            fp.status = "error"
+            fp.message = str(e)
+            self._emit("file_progress", fp)
+            self.progress.failed += 1
+            return UploadResult(file_path, False, error=str(e))
 
     def _hash_file(self, file_path: str) -> _HashedFile:
         """Phase 1: compute SHA-1 hash (CPU-bound). Runs in hash thread pool."""
