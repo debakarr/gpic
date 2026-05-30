@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,38 +20,43 @@ class UploadCache:
     def __init__(self):
         self._path = get_data_dir() / "upload_cache.json"
         self._cache: dict[str, dict] = {}
+        self._lock = threading.Lock()
         self._load()
 
     def get(self, file_path: str) -> Optional[dict]:
         """Get cached upload info for a file path, or None if expired/missing."""
-        entry = self._cache.get(str(file_path))
-        if not entry:
-            return None
-        # Check TTL
-        if time.time() - entry.get("timestamp", 0) > CACHE_TTL:
-            self._cache.pop(str(file_path), None)
-            self._save()
-            return None
-        return entry
+        with self._lock:
+            entry = self._cache.get(str(file_path))
+            if not entry:
+                return None
+            # Check TTL
+            if time.time() - entry.get("timestamp", 0) > CACHE_TTL:
+                self._cache.pop(str(file_path), None)
+                self._save()
+                return None
+            return entry
 
     def set(self, file_path: str, upload_id: str, file_size: int):
         """Cache an upload token for a file path."""
-        self._cache[str(file_path)] = {
-            "upload_id": upload_id,
-            "file_size": file_size,
-            "timestamp": int(time.time()),
-        }
-        self._save()
+        with self._lock:
+            self._cache[str(file_path)] = {
+                "upload_id": upload_id,
+                "file_size": file_size,
+                "timestamp": int(time.time()),
+            }
+            self._save()
 
     def remove(self, file_path: str):
         """Remove cached upload for a file (called on successful upload)."""
-        self._cache.pop(str(file_path), None)
-        self._save()
+        with self._lock:
+            self._cache.pop(str(file_path), None)
+            self._save()
 
     def remove_all(self):
         """Clear all cached uploads."""
-        self._cache.clear()
-        self._save()
+        with self._lock:
+            self._cache.clear()
+            self._save()
 
     def _load(self):
         try:
@@ -70,3 +76,4 @@ class UploadCache:
                 self._path.chmod(0o600)
             except OSError:
                 pass
+

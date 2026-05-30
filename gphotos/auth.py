@@ -1,3 +1,4 @@
+import threading
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlencode
@@ -11,16 +12,23 @@ class AuthManager:
         self._language = language
         self._token: str = ""
         self._expiry: int = 0
+        self._lock = threading.Lock()
 
     def _parse_auth_string(self, auth_string: str) -> dict[str, str]:
         return {k: v[0] for k, v in parse_qs(auth_string).items()}
 
     def get_bearer_token(self, auth_string: str) -> str:
+        # Fast path: token is valid, no lock needed
         now = int(time.time())
         if self._token and self._expiry > now:
             return self._token
-        self._token, self._expiry = self._fetch_token(auth_string)
-        return self._token
+        # Slow path: token expired, acquire lock and double-check
+        with self._lock:
+            now = int(time.time())
+            if self._token and self._expiry > now:
+                return self._token
+            self._token, self._expiry = self._fetch_token(auth_string)
+            return self._token
 
     def _fetch_token(self, auth_string: str) -> tuple[str, int]:
         params = self._parse_auth_string(auth_string)

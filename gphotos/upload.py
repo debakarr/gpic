@@ -27,9 +27,12 @@ class UploadResult:
 class UploadManager:
     @staticmethod
     def auto_threads(files: list[str]) -> int:
-        """Auto-detect optimal thread count based on file sizes."""
+        """Auto-detect optimal thread count based on file sizes.
+
+        Returns a value between 1 and 12, tuned for bandwidth utilisation.
+        """
         if not files:
-            return 3
+            return 4
 
         sizes = []
         for f in files:
@@ -39,7 +42,7 @@ class UploadManager:
                 sizes.append(0)
 
         if not sizes:
-            return 3
+            return 4
 
         count = len(sizes)
         total = sum(sizes)
@@ -47,31 +50,33 @@ class UploadManager:
         biggest = max(sizes)
 
         # Score system: start neutral, adjust for conditions
-        score = 3  # base
+        score = 4  # base (raised from 3)
 
         # Factor 1: Average file size (bandwidth saturation risk)
         if avg > 500_000_000:       # >500MB avg → big files, few threads
-            score -= 1
+            score -= 2
         elif avg > 50_000_000:      # >50MB avg → moderate
-            pass  # score stays at 3
-        elif avg > 5_000_000:       # 5-50MB → slightly more threads
-            score += 1
-        else:                       # <5MB avg → many small files
+            pass  # score stays at 4
+        elif avg > 5_000_000:       # 5-50MB → more threads help
             score += 2
+        else:                       # <5MB avg → many small files, maximise concurrency
+            score += 4
 
         # Factor 2: Largest file (head-of-line blocking risk)
         if biggest > 5_000_000_000:  # >5GB file present → very conservative
             score = max(score - 1, 1)
         elif biggest > 1_000_000_000:  # >1GB file present
-            score = max(score - 1, 1)
+            score = max(score - 1, 2)
 
         # Factor 3: File count (concurrency opportunity)
-        if count >= 50:
+        if count >= 100:
+            score += 2
+        elif count >= 50:
             score += 1
         elif count <= 3 and avg > 100_000_000:
             score = min(score, 2)  # few big files → don't overload
 
-        return max(1, min(score, 8))
+        return max(1, min(score, 12))
 
     def __init__(
         self,
@@ -161,8 +166,8 @@ class UploadManager:
             use_quota=self._use_quota,
         )
 
-        # Phase 1: Hash all files in parallel (CPU-bound, 2 threads is enough)
-        hash_executor = ThreadPoolExecutor(max_workers=2)
+        # Phase 1: Hash all files in parallel (CPU + disk I/O bound)
+        hash_executor = ThreadPoolExecutor(max_workers=4)
         hash_futures: dict = {
             hash_executor.submit(self._hash_file, f): f for f in files
         }
@@ -213,7 +218,7 @@ class UploadManager:
         fp.message = "Calculating SHA1..."
         self._emit("file_progress", fp)
         sha1 = self._api.calculate_sha1(file_path)
-        sha1_b64 = base64.urlsafe_b64encode(sha1).decode()
+        sha1_b64 = base64.b64encode(sha1).decode()
         return (file_path, sha1, sha1_b64)
 
     def _upload_with_hash(self, hashed: _HashedFile) -> UploadResult:

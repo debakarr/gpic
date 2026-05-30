@@ -47,6 +47,10 @@ class GooglePhotosAPI:
         self._client = httpx.Client(
             transport=transport,
             timeout=None,
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=20,
+            ),
             headers={
                 "Accept-Encoding": "gzip",
                 "Accept-Language": language,
@@ -245,13 +249,14 @@ class GooglePhotosAPI:
                         on_progress(total_read, file_size)
                     yield chunk
 
+        content_length = file_size - start_byte
         headers = {
             "Authorization": f"Bearer {self._bearer()}",
             "Content-Type": "application/octet-stream",
+            "Content-Length": str(content_length),
+            "Content-Range": f"bytes {start_byte}-{file_size - 1}/{file_size}",
             "User-Agent": self._user_agent,
         }
-        if start_byte > 0:
-            headers["Content-Range"] = f"bytes {start_byte}-{file_size - 1}/{file_size}"
 
         resp = self._client.put(
             upload_url,
