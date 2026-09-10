@@ -1,73 +1,78 @@
 # gpic
 
-**Python tool to push pics and videos to Google Photos.**
-
-> Built as a Python alternative to [gotohp](https://github.com/xob0t/gotohp) by [xob0t](https://github.com/xob0t).  
-> **Massive credit** to the gotohp project for the reverse engineering work on the Google Photos internal API.
+Command-line tool that pushes photos and videos to Google Photos. Python port of [gotohp](https://github.com/xob0t/gotohp) by [xob0t](https://github.com/xob0t) — the protocol work is his.
 
 ## Features
 
-- 🚀 **Upload to Google Photos** via the internal mobile API (unlimited free storage)
-- 📊 **Per-file percentage progress** — live ASCII progress bars showing 0–100%
-- ⚡ **Concurrent uploads** with auto-detected thread count based on file sizes
-- ⏱️ **Transfer speed & ETA** — shows MB/s and time remaining
-- 🔁 **Smart retry** — exponential backoff with jitter on failures
-- 🔍 **Hash dedup** — skips files already in your library (SHA-1 check)
-- 📁 **Recursive directory scanning** — upload entire folder trees
-- 🖼️ **Album creation** — auto-create albums by folder, or specify a name
-- 📦 **CLI-friendly JSON output** — `--json` flag for scripting
-- 🔄 **Upload resume** (large files) — resumes interrupted uploads via `Content-Range`
+- Uploads to Google Photos through the internal mobile API
+- Per-file progress bars (0–100%)
+- Thread count picked automatically from file sizes (override with `-t`)
+- Speed and ETA while uploading
+- Retry with exponential backoff and jitter
+- Skips files already in the library (SHA-1 check)
+- Recursive directory scan
+- Create albums by folder (`AUTO`) or by name
+- `--json` summary output for scripts
+- Large-file resume via `Content-Range`
+
+## Privacy & Data
+
+- **No analytics or telemetry.** Dependencies are click, httpx, protobuf and rich.
+- **Your photos go to Google Photos and nowhere else.** The tool reads files from the paths you give it and talks only to Google endpoints (`android.googleapis.com/auth`, `photos.googleapis.com`, `photosdata-pa.googleapis.com`).
+- **Credentials sit in plain text** in the config file (see below), including any `--proxy` URL with a password in it. Anyone who can read that file can use your Photos login. File permissions are set to owner-only on creation, but on a shared machine delete the credential when you are done (`gpic creds remove <email>`).
+- The bearer token is kept in memory and refreshed as needed. Nothing else is stored besides the config file and the upload-resume cache.
 
 ## Installation
 
 ```bash
-# Install with uv (recommended)
+# with uv (recommended)
 uv tool install gpic
 
-# Or pip
+# or pip
 pip install gpic
 ```
 
-Requires Python 3.10+.
+Needs Python 3.10+.
 
 ## Quick Start
 
-### 1. Get credentials from your phone
+### 1. Get the credential from your phone
 
-**Prerequisites:**
-- Android device with [ReVanced Google Photos](https://github.com/ReVanced/revanced-patches) or official Google Photos (root)
-- USB debugging enabled (`adb`)
+You need:
 
-**On your PC:**
+- Android phone with Google Photos (ReVanced build, or official app on a rooted device)
+- USB debugging on (`adb`)
+
+On your PC:
 
 ```powershell
-# Clear logcat and start capturing
+# clear logcat, then capture
 adb logcat -c 2>$null
 adb logcat | Select-String "auth"
 ```
 
-On your phone, open Google Photos. A log line containing `androidId=...&Email=...&Token=...` should appear. Copy the full line.
+Open Google Photos on the phone. A line with `androidId=...&Email=...&Token=...` shows up. Copy the whole line — it must include a `photos.native` service, a `userinfo.profile` line will fail every call with 403.
 
-### 2. Add the credentials
+### 2. Save it
 
 ```powershell
-gpic creds add "androidId=...&Email=...&Token=..." 
+gpic creds add "androidId=...&Email=...&Token=..."
 ```
 
-### 3. Upload files
+### 3. Upload
 
 ```powershell
-# Single file
+# one file
 gpic upload "C:\DJI Recording\video.mp4"
 
-# Directory (recursive)
+# a folder, recursive
 gpic upload -r "C:\DJI Recording"
 
-# Multiple files
+# several files
 gpic upload photo1.jpg video.mp4
 
-# All WhatsApp images
-gpic upload "C:\Users\me\Downloads\WhatsApp*"
+# biggest files first
+gpic upload -r --sort-size "C:\DJI Recording"
 ```
 
 ## CLI Reference
@@ -96,6 +101,7 @@ Options:
   --quota                  Use storage quota (mimics Pixel 8)
   --proxy TEXT             HTTP proxy URL
   --json                   Output JSON summary
+  --sort-size              Process largest files first
 ```
 
 ### `gpic creds`
@@ -112,24 +118,24 @@ Commands:
 
 ## Auto-Detect Threads
 
-The tool automatically chooses the optimal number of concurrent upload threads based on file sizes:
+Thread count is picked from the file sizes:
 
-| Scenario | Threads | Why |
+| Files | Threads | Reason |
 |---|---|---|
-| Large files (GB+) | 1–2 | Avoid saturating bandwidth |
-| Medium files (50–500 MB) | 3–4 | Balanced throughput |
-| Small files (<5 MB) | 5–6 | Overlap network latency |
-| Tons of tiny files (100+) | 6–8 | Maximize concurrency |
+| Large (GB+) | 1–2 | Big files saturate bandwidth alone |
+| Medium (50–500 MB) | 3–4 | Balanced |
+| Small (<5 MB) | 5–6 | Overlaps network latency |
+| Lots of tiny files (100+) | 6–8 | Max concurrency |
 
-Override with `-t N` to set a fixed thread count.
+Override with `-t N`.
 
 ## Upload Resume
 
-For large files, if the upload is interrupted, the tool automatically resumes from where it left off instead of restarting from zero. This uses Google's resumable media upload protocol with `Content-Range` headers.
+Interrupted large files resume where they stopped instead of restarting, using Google's resumable upload protocol (`Content-Range` headers). Resume state is cached on disk for 24 hours.
 
 ## Configuration
 
-Config file location (auto-created):
+Config file (created automatically):
 
 | OS | Path |
 |---|---|
@@ -137,17 +143,20 @@ Config file location (auto-created):
 | macOS | `~/Library/Application Support/gpic/config.json` |
 | Linux | `~/.config/gpic/config.json` |
 
-## Security Notes
+## Troubleshooting
 
-- **Credentials are stored in plain text** in the config file. Protect your config file with appropriate file system permissions.
-- The `--proxy` URL (if it contains credentials like `http://user:pass@host:port`) is also stored in plain text.
-- On shared machines, consider deleting credentials after use.
-- The bearer token is cached in memory only and refreshed automatically.
+- **`UNREGISTERED_ON_API_CONSOLE` (HTTP 400):** the pasted string is incomplete. Re-copy the full logcat line with `service=...` in it.
+- **403 after hashing:** the token works but the scope is wrong — you pasted a `userinfo.profile` line instead of a `photos.native` one. Filter logcat on `photos.native` and copy that line.
+- **`Protocol message tag had invalid wire type`:** update gpic, then retry.
+
+## Disclaimer
+
+This uses the unofficial internal Google Photos mobile API, not the official Library API. Google can change or block it at any time. Use at your own risk.
 
 ## Credits
 
-- **[gotohp](https://github.com/xob0t/gotohp)** by [xob0t](https://github.com/xob0t) — the original Go implementation that this project is based on. All protocol reverse-engineering credit goes to them.
-- **[google_photos_mobile_client](https://github.com/xob0t/google_photos_mobile_client)** — Python reference implementation of the same API.
+- **[gotohp](https://github.com/xob0t/gotohp)** by [xob0t](https://github.com/xob0t) — the original Go implementation this is based on.
+- **[google_photos_mobile_client](https://github.com/xob0t/google_photos_mobile_client)** — Python reference for the same API.
 
 ## License
 
